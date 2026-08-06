@@ -1,150 +1,181 @@
-package com.example.nothing1glyphcontroller:
-import android.Manifest;
-import android.content.pm.PackageManager;
+package com.example.nothing1glyphcontroller;
+
 import android.os.Bundle;
-import android.os.Handler;
 import android.widget.Button;
 import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.app.ActivityCompat;
-import androidx.core.content.ContextCompat;
 
 import java.io.DataOutputStream;
 import java.io.IOException;
 
 public class MainActivity extends AppCompatActivity {
 
-    private static final int PERMISSION_REQUEST_CODE = 100;
-    private static final String LED_PATH = "/sys/class/leds/aw210xx_led/all_white_leds_br";
+    private static final String LED_PATH = "/sys/class/leds/aw210xx_led/all_white_leds_br"; // ここを実機のパスに変更
 
-    // パラメータ変数
-    private int loopTime = 5000; // ミリ秒
-    private int maxBrightness = 4095;
-    private int changeTime = 2000; // ミリ秒
-    private int darkRatio = 50; // 暗い時間の割合（0-100）
+    // パラメータ
+    private int loopTimeMs = 5000;      // 1ループ時間
+    private int maxBrightness = 4095;   // 最大光量
+    private int changeTimeMs = 2000;    // 明るく/暗く変化する時間
+    private int darkRatio = 50;         // 残り時間のうち暗い時間の割合(%)
 
-    // UI要素
+    // UI
     private TextView loopTimeText;
     private TextView maxBrightnessText;
     private TextView changeTimeText;
-    private SeekBar darkRatioSeekBar;
     private TextView darkRatioText;
+
+    private SeekBar loopTimeSeekBar;
+    private SeekBar maxBrightnessSeekBar;
+    private SeekBar changeTimeSeekBar;
+    private SeekBar darkRatioSeekBar;
+
     private Button startButton;
     private Button stopButton;
 
-    private Handler handler;
-    private Runnable ledRunnable;
-    private boolean isRunning = false;
+    // 制御
+    private volatile boolean isRunning = false;
+    private Thread controlThread;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        // パーミッションのチェック
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
-                != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this,
-                    new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE},
-                    PERMISSION_REQUEST_CODE);
-        }
-
-        // UI要素の初期化
-        initUI();
-
-        // ハンドラの初期化
-        handler = new Handler();
-
-        // イベントリスナーの設定
-        setupEventListeners();
+        bindViews();
+        setupSeekBars();
+        setupButtons();
+        refreshAllTexts();
+        updateChangeTimeLimit();
     }
 
-    private void initUI() {
+    private void bindViews() {
         loopTimeText = findViewById(R.id.loopTimeText);
         maxBrightnessText = findViewById(R.id.maxBrightnessText);
         changeTimeText = findViewById(R.id.changeTimeText);
-        darkRatioSeekBar = findViewById(R.id.darkRatioSeekBar);
         darkRatioText = findViewById(R.id.darkRatioText);
+
+        loopTimeSeekBar = findViewById(R.id.loopTimeSeekBar);
+        maxBrightnessSeekBar = findViewById(R.id.maxBrightnessSeekBar);
+        changeTimeSeekBar = findViewById(R.id.changeTimeSeekBar);
+        darkRatioSeekBar = findViewById(R.id.darkRatioSeekBar);
+
         startButton = findViewById(R.id.startButton);
         stopButton = findViewById(R.id.stopButton);
-
-        // 初期値の設定
-        loopTimeText.setText("ループ時間: " + loopTime/1000.0 + "秒");
-        maxBrightnessText.setText("最大光量: " + maxBrightness);
-        changeTimeText.setText("変化時間: " + changeTime/1000.0 + "秒");
-        darkRatioSeekBar.setProgress(darkRatio);
-        darkRatioText.setText("暗い時間割合: " + darkRatio + "%");
     }
 
-    private void setupEventListeners() {
-        // ループ時間スライダー
-        findViewById(R.id.loopTimeSeekBar).setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+    private void setupSeekBars() {
+        // ループ時間: 1〜60秒 (progress + 1) 秒
+        loopTimeSeekBar.setMax(18);
+        loopTimeSeekBar.setProgress(5); // 5秒
+        loopTimeSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                loopTime = progress * 1000; // 秒からミリ秒に変換
-                loopTimeText.setText("ループ時間: " + loopTime/1000.0 + "秒");
+                loopTimeMs = (progress + 2) * 500;
+                updateChangeTimeLimit();
+                clampChangeTimeToLoop();
+                refreshTexts();
             }
 
-            @Override
-            public void onStartTrackingTouch(SeekBar seekBar) {}
-
-            @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
         });
 
-        // 最大光量スライダー
-        findViewById(R.id.maxBrightnessSeekBar).setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+        // 最大光量: 0〜4095
+        maxBrightnessSeekBar.setMax(4095);
+        maxBrightnessSeekBar.setProgress(4095);
+        maxBrightnessSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
                 maxBrightness = progress;
-                maxBrightnessText.setText("最大光量: " + maxBrightness);
+                refreshTexts();
             }
 
-            @Override
-            public void onStartTrackingTouch(SeekBar seekBar) {}
-
-            @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
         });
 
-        // 変化時間スライダー
-        findViewById(R.id.changeTimeSeekBar).setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+        // 変化時間: 100ms単位で動かす
+        // 実際の上限は loopTime / 2 に連動して可変
+        changeTimeSeekBar.setMax(Math.max(1, loopTimeMs / 200));
+        changeTimeSeekBar.setProgress(20); // 2.0秒
+        changeTimeSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                changeTime = progress * 100; // 0.1秒単位
-                changeTimeText.setText("変化時間: " + changeTime/1000.0 + "秒");
+                changeTimeMs = progress * 100;
+                clampChangeTimeToLoop();
+                refreshTexts();
             }
 
-            @Override
-            public void onStartTrackingTouch(SeekBar seekBar) {}
-
-            @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
         });
 
-        // 暗い時間割合スライダー
+        // 暗い時間の比率: 0〜100%
+        darkRatioSeekBar.setMax(100);
+        darkRatioSeekBar.setProgress(50);
         darkRatioSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
                 darkRatio = progress;
-                darkRatioText.setText("暗い時間割合: " + darkRatio + "%");
+                refreshTexts();
             }
 
-            @Override
-            public void onStartTrackingTouch(SeekBar seekBar) {}
-
-            @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
         });
+    }
 
-        // 開始ボタン
+    private void setupButtons() {
         startButton.setOnClickListener(v -> startLEDControl());
-
-        // 停止ボタン
         stopButton.setOnClickListener(v -> stopLEDControl());
+
+        stopButton.setEnabled(false);
+    }
+
+    private void refreshAllTexts() {
+        refreshTexts();
+    }
+
+    private void refreshTexts() {
+        long effectiveChange = Math.min(changeTimeMs, loopTimeMs / 2);
+        long remain = Math.max(0, loopTimeMs - (effectiveChange * 2));
+        long darkHold = Math.round(remain * (darkRatio / 100.0));
+        long brightHold = remain - darkHold;
+
+        loopTimeText.setText("ループ時間: " + loopTimeMs + " ms");
+        maxBrightnessText.setText("最大光量: " + maxBrightness);
+
+        changeTimeText.setText(
+                "変化時間: " + changeTimeMs + " ms"
+        );
+
+        darkRatioText.setText(
+                "暗い時間の比率: " + darkRatio + "%"
+                + "（上限 " + (loopTimeMs / 2) + " ms）"
+                + " / 暗: " + darkHold + " ms"
+                + " / 明: " + brightHold + " ms"
+
+        );
+    }
+
+    private void updateChangeTimeLimit() {
+        int maxChangeProgress = Math.max(1, loopTimeMs / 200); // 100ms単位なので /200
+        changeTimeSeekBar.setMax(maxChangeProgress);
+
+        if (changeTimeSeekBar.getProgress() > maxChangeProgress) {
+            changeTimeSeekBar.setProgress(maxChangeProgress);
+        }
+    }
+
+    private void clampChangeTimeToLoop() {
+        int maxAllowed = loopTimeMs / 2;
+        if (changeTimeMs > maxAllowed) {
+            changeTimeMs = maxAllowed;
+            changeTimeSeekBar.setProgress(changeTimeMs / 100);
+        }
     }
 
     private void startLEDControl() {
@@ -154,87 +185,167 @@ public class MainActivity extends AppCompatActivity {
         startButton.setEnabled(false);
         stopButton.setEnabled(true);
 
-        // LED制御のRunnableを開始
-        ledRunnable = new Runnable() {
-            @Override
-            public void run() {
-                if (!isRunning) return;
-
+        controlThread = new Thread(() -> {
+            try {
+                while (isRunning) {
+                    CyclePlan plan = buildCyclePlan();
+                    runOneCycle(plan);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (Exception e) {
+                runOnUiThread(() ->
+                        Toast.makeText(MainActivity.this,
+                                "LED制御エラー: " + e.getMessage(),
+                                Toast.LENGTH_SHORT).show()
+                );
+            } finally {
+                isRunning = false;
+                runOnUiThread(() -> {
+                    startButton.setEnabled(true);
+                    stopButton.setEnabled(false);
+                });
                 try {
-                    // パラメータを計算
-                    int brightChangeTime = Math.min(changeTime, loopTime / 2);
-                    int darkChangeTime = Math.min(changeTime, loopTime / 2);
-
-                    // 暗い時間と明るい時間の割合を計算
-                    int darkTime = (int) (loopTime * darkRatio / 100.0);
-                    int brightTime = loopTime - darkTime;
-
-                    // 明るくする
-                    setLEDIntensity(0, maxBrightness, brightChangeTime, 10);
-                    // 暗くする
-                    setLEDIntensity(maxBrightness, 0, darkChangeTime, 10);
-
-                    // 次のループをスケジュール
-                    handler.postDelayed(this, loopTime);
-                } catch (Exception e) {
-                    Toast.makeText(MainActivity.this, "LED制御エラー: " + e.getMessage(), Toast.LENGTH_SHORT).show();
-                    stopLEDControl();
+                    writeLED(0);
+                } catch (IOException ignored) {
                 }
             }
-        };
+        });
 
-        handler.post(ledRunnable);
+        controlThread.start();
     }
 
     private void stopLEDControl() {
         isRunning = false;
-        if (ledRunnable != null) {
-            handler.removeCallbacks(ledRunnable);
+        if (controlThread != null) {
+            controlThread.interrupt();
         }
-        startButton.setEnabled(true);
-        stopButton.setEnabled(false);
-
-        // LEDをオフ
-        setLEDIntensity(0, 0, 100, 10);
     }
 
-    private void setLEDIntensity(int start, int end, int duration, int steps) {
-        if (duration <= 0 || steps <= 0) return;
+    private CyclePlan buildCyclePlan() {
+        long effectiveChange = Math.min(changeTimeMs, loopTimeMs / 2L);
+        long remaining = Math.max(0L, loopTimeMs - (effectiveChange * 2L));
 
-        int step = (end - start) / steps;
-        int interval = duration / steps;
+        long darkHold = Math.round(remaining * (darkRatio / 100.0));
+        long brightHold = remaining - darkHold;
 
-        for (int i = 0; i < steps; i++) {
-            final int brightness = start + (step * i);
-            try {
-                writeLED(brightness);
-                try {
-                    Thread.sleep(interval);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    return;
-                }
-            } catch (IOException e) {
-                Toast.makeText(this, "LED書き込みエラー: " + e.getMessage(), Toast.LENGTH_SHORT).show();
-                return;
+        return new CyclePlan(effectiveChange, darkHold, brightHold);
+    }
+
+    private void runOneCycle(CyclePlan plan) throws IOException, InterruptedException {
+        // 暗い状態から開始
+        writeLED(0);
+        sleepInterruptible(plan.darkHoldMs);
+
+        // 暗 -> 明
+        fadeLED(0, maxBrightness, plan.changeMs);
+
+        // 明るい状態
+        sleepInterruptible(plan.brightHoldMs);
+
+        // 明 -> 暗
+        fadeLED(maxBrightness, 0, plan.changeMs);
+    }
+
+    private void fadeLED(int from, int to, long durationMs)
+            throws IOException, InterruptedException {
+
+        if (!isRunning) return;
+
+        if (durationMs <= 0) {
+            writeLED(to);
+            return;
+        }
+
+        // 20ms更新
+        int steps = (int)Math.max(20, durationMs / 20);
+
+        long interval = durationMs / steps;
+
+
+        for (int i = 0; i <= steps && isRunning; i++) {
+
+            double progress = i / (double) steps;
+
+
+            // ガンマ補正
+            // 1より大きいほど暗い側がゆっくり変化
+            double gamma = 2.2;
+
+
+            double corrected;
+
+            if (from < to) {
+                // 明るくする
+                corrected = Math.pow(progress, gamma);
+            } else {
+                // 暗くする
+                corrected = 1.0 - Math.pow(1.0 - progress, gamma);
             }
+
+
+            int value =
+                    (int)Math.round(
+                            from + ((to - from) * corrected)
+                    );
+
+
+            writeLED(value);
+
+            if(i < steps) {
+                sleepInterruptible(interval);
+            }
+        }
+    }
+
+    private void sleepInterruptible(long ms) throws InterruptedException {
+        long end = System.currentTimeMillis() + ms;
+        while (isRunning) {
+            long remain = end - System.currentTimeMillis();
+            if (remain <= 0) break;
+            Thread.sleep(Math.min(remain, 100));
+        }
+        if (!isRunning) {
+            throw new InterruptedException("stopped");
         }
     }
 
     private void writeLED(int brightness) throws IOException {
         Process process = Runtime.getRuntime().exec("su");
-        DataOutputStream os = new DataOutputStream(process.getOutputStream());
-        os.writeBytes("echo " + brightness + " > " + LED_PATH + "\n");
-        os.writeBytes("exit\n");
-        os.flush();
-        process.waitFor();
+        try (DataOutputStream os = new DataOutputStream(process.getOutputStream())) {
+            os.writeBytes("echo " + brightness + " > " + LED_PATH + "\n");
+            os.writeBytes("exit\n");
+            os.flush();
+        }
+
+        try {
+            process.waitFor();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            process.destroy();
+        }
+    }
+
+    private int clamp(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        if (isRunning) {
-            stopLEDControl();
+        stopLEDControl();
+    }
+
+    private static class CyclePlan {
+        final long changeMs;
+        final long darkHoldMs;
+        final long brightHoldMs;
+
+        CyclePlan(long changeMs, long darkHoldMs, long brightHoldMs) {
+            this.changeMs = changeMs;
+            this.darkHoldMs = darkHoldMs;
+            this.brightHoldMs = brightHoldMs;
         }
     }
 }
