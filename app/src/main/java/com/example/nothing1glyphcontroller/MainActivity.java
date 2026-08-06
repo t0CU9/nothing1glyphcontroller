@@ -1,5 +1,6 @@
 package com.example.nothing1glyphcontroller;
 
+import android.annotation.SuppressLint;
 import android.os.Bundle;
 import android.widget.Button;
 import android.widget.SeekBar;
@@ -139,6 +140,7 @@ public class MainActivity extends AppCompatActivity {
         refreshTexts();
     }
 
+    @SuppressLint("SetTextI18n")
     private void refreshTexts() {
         long effectiveChange = Math.min(changeTimeMs, loopTimeMs / 2);
         long remain = Math.max(0, loopTimeMs - (effectiveChange * 2));
