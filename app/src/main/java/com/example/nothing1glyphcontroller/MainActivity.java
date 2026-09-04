@@ -1,28 +1,55 @@
 package com.example.nothing1glyphcontroller;
 
+import android.Manifest;
 import android.annotation.SuppressLint;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.widget.Button;
 import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
-
-import java.io.DataOutputStream;
-import java.io.IOException;
+import androidx.core.content.ContextCompat;
 
 public class MainActivity extends AppCompatActivity {
 
-    private static final String LED_PATH = "/sys/class/leds/aw210xx_led/all_white_leds_br"; // 実機のパスに変更
+    public static final String PREFS_NAME = "led_settings";
 
-    // パラメータ
-    private int loopTimeMs = 5000;      // 1ループ時間
-    private int maxBrightness = 4095;   // 最大光量
-    private int changeTimeMs = 2000;    // 明るく/暗く変化する時間
-    private int darkRatio = 50;         // 残り時間のうち暗い時間の割合(%)
+    public static final String KEY_LOOP_TIME = "loop_time";
+    public static final String KEY_MAX_BRIGHTNESS = "max_brightness";
+    public static final String KEY_CHANGE_TIME = "change_time";
+    public static final String KEY_DARK_RATIO = "dark_ratio";
+    public static final String KEY_RUNNING = "running";
 
-    // UI
+    public static final String ACTION_START =
+            "com.example.nothing1glyphcontroller.START";
+    public static final String ACTION_STOP =
+            "com.example.nothing1glyphcontroller.STOP";
+
+    private static final String KEY_SETTINGS_VERSION = "settings_version";
+    private static final int SETTINGS_VERSION = 3;
+
+    private static final int DEFAULT_LOOP_TIME = 5000;
+    private static final int DEFAULT_MAX_BRIGHTNESS = 4095;
+    private static final int DEFAULT_CHANGE_TIME = 2500;
+    private static final int DEFAULT_DARK_RATIO = 50;
+
+    private static final int MIN_LOOP_TIME = 500;
+    private static final int MAX_LOOP_TIME = 10000;
+    private static final int LOOP_STEP = 500;
+    private static final int CHANGE_STEP = 50;
+
+    private int loopTimeMs;
+    private int maxBrightness;
+    private int changeTimeMs;
+    private int darkRatio;
+
     private TextView loopTimeText;
     private TextView maxBrightnessText;
     private TextView changeTimeText;
@@ -36,30 +63,140 @@ public class MainActivity extends AppCompatActivity {
     private Button startButton;
     private Button stopButton;
 
-    // 制御
-    private volatile boolean isRunning = false;
-    private Thread controlThread;
+    private SharedPreferences prefs;
+    private boolean initializing = true;
 
-    // root shell
-    private Process rootProcess;
-    private DataOutputStream rootStream;
-
-    // 同期待機用
-    private final Object sleepLock = new Object();
+    private final ActivityResultLauncher<String> notificationPermissionLauncher =
+            registerForActivityResult(
+                    new ActivityResultContracts.RequestPermission(),
+                    granted -> {
+                        if (granted) {
+                            startLEDControl();
+                        } else {
+                            Toast.makeText(
+                                    this,
+                                    "通知権限が必要です",
+                                    Toast.LENGTH_SHORT
+                            ).show();
+                        }
+                    }
+            );
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
+        prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+
+        initializeSettings();
         bindViews();
         setupSeekBars();
         setupButtons();
 
-        refreshAllTexts();
-        updateChangeTimeLimit();
-        clampChangeTimeToLoop();
+        applySettingsToSeekBars();
+
+        initializing = false;
+
         refreshTexts();
+        updateButtons();
+        requestNotificationPermissionIfNeeded();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+
+        if (!initializing) {
+            loadSettings();
+            applySettingsToSeekBars();
+            refreshTexts();
+            updateButtons();
+        }
+    }
+
+    private void initializeSettings() {
+        int version = prefs.getInt(KEY_SETTINGS_VERSION, 0);
+
+        if (version == 0) {
+            prefs.edit()
+                    .putInt(KEY_LOOP_TIME, DEFAULT_LOOP_TIME)
+                    .putInt(
+                            KEY_MAX_BRIGHTNESS,
+                            DEFAULT_MAX_BRIGHTNESS
+                    )
+                    .putInt(
+                            KEY_CHANGE_TIME,
+                            DEFAULT_CHANGE_TIME
+                    )
+                    .putInt(
+                            KEY_DARK_RATIO,
+                            DEFAULT_DARK_RATIO
+                    )
+                    .putBoolean(KEY_RUNNING, false)
+                    .putInt(
+                            KEY_SETTINGS_VERSION,
+                            SETTINGS_VERSION
+                    )
+                    .apply();
+        } else if (version < SETTINGS_VERSION) {
+            prefs.edit()
+                    .putInt(
+                            KEY_CHANGE_TIME,
+                            DEFAULT_CHANGE_TIME
+                    )
+                    .putInt(
+                            KEY_SETTINGS_VERSION,
+                            SETTINGS_VERSION
+                    )
+                    .apply();
+        }
+
+        loadSettings();
+    }
+
+    private void loadSettings() {
+        loopTimeMs = clamp(
+                prefs.getInt(KEY_LOOP_TIME, DEFAULT_LOOP_TIME),
+                MIN_LOOP_TIME,
+                MAX_LOOP_TIME
+        );
+
+        maxBrightness = clamp(
+                prefs.getInt(
+                        KEY_MAX_BRIGHTNESS,
+                        DEFAULT_MAX_BRIGHTNESS
+                ),
+                0,
+                4095
+        );
+
+        changeTimeMs = clamp(
+                prefs.getInt(
+                        KEY_CHANGE_TIME,
+                        DEFAULT_CHANGE_TIME
+                ),
+                0,
+                loopTimeMs / 2
+        );
+
+        darkRatio = clamp(
+                prefs.getInt(
+                        KEY_DARK_RATIO,
+                        DEFAULT_DARK_RATIO
+                ),
+                0,
+                100
+        );
+    }
+
+    private void saveSettings() {
+        prefs.edit()
+                .putInt(KEY_LOOP_TIME, loopTimeMs)
+                .putInt(KEY_MAX_BRIGHTNESS, maxBrightness)
+                .putInt(KEY_CHANGE_TIME, changeTimeMs)
+                .putInt(KEY_DARK_RATIO, darkRatio)
+                .apply();
     }
 
     private void bindViews() {
@@ -78,324 +215,365 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void setupSeekBars() {
-        // ループ時間: 0.5秒刻み、0.5～60.0秒
-        // progress 0 => 500ms, progress 119 => 60000ms
-        loopTimeSeekBar.setMax(18);
-        loopTimeSeekBar.setProgress(9); // 5.0秒
-
-        loopTimeSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                loopTimeMs = (progress + 2) * 500;
-                updateChangeTimeLimit();
-                clampChangeTimeToLoop();
-                refreshTexts();
-            }
-
-            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
-            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
-        });
-
-        // 最大光量: 0～4095
-        maxBrightnessSeekBar.setMax(4095);
-        maxBrightnessSeekBar.setProgress(4095);
-
-        maxBrightnessSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                maxBrightness = progress;
-                refreshTexts();
-            }
-
-            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
-            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
-        });
-
-        // 変化時間: 50ms刻み
-        changeTimeSeekBar.setMax(Math.max(1, loopTimeMs / 50));
-        changeTimeSeekBar.setProgress(40); // 2000ms
-
-        changeTimeSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                changeTimeMs = progress * 50;
-                clampChangeTimeToLoop();
-                refreshTexts();
-            }
-
-            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
-            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
-        });
-
-        // 暗い時間の比率: 0～100%
-        darkRatioSeekBar.setMax(100);
-        darkRatioSeekBar.setProgress(50);
-
-        darkRatioSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                darkRatio = progress;
-                refreshTexts();
-            }
-
-            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
-            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
-        });
-    }
-
-    private void setupButtons() {
-        startButton.setOnClickListener(v -> startLEDControl());
-        stopButton.setOnClickListener(v -> stopLEDControl());
-        stopButton.setEnabled(false);
-    }
-
-    private void refreshAllTexts() {
-        refreshTexts();
-    }
-
-    @SuppressLint("SetTextI18n")
-    private void refreshTexts() {
-        long effectiveChange = Math.min(changeTimeMs, loopTimeMs / 2L);
-        long remain = Math.max(0L, loopTimeMs - (effectiveChange * 2L));
-        long darkHold = Math.round(remain * (darkRatio / 100.0));
-        long brightHold = remain - darkHold;
-
-        loopTimeText.setText("ループ時間: " + loopTimeMs + " ms");
-        maxBrightnessText.setText("最大光量: " + maxBrightness + " / 4095");
-        changeTimeText.setText(
-                "変化時間: " + changeTimeMs + " ms"
-                        + "（上限 " + (loopTimeMs / 2) + " ms）"
+        loopTimeSeekBar.setMax(
+                (MAX_LOOP_TIME - MIN_LOOP_TIME) / LOOP_STEP
         );
-        darkRatioText.setText(
-                "暗い時間の比率: " + darkRatio + "%"
-                        + " / 暗: " + darkHold + " ms"
-                        + " / 明: " + brightHold + " ms"
+
+        loopTimeSeekBar.setOnSeekBarChangeListener(
+                new SeekBar.OnSeekBarChangeListener() {
+                    @Override
+                    public void onProgressChanged(
+                            SeekBar seekBar,
+                            int progress,
+                            boolean fromUser
+                    ) {
+                        loopTimeMs =
+                                MIN_LOOP_TIME +
+                                        progress * LOOP_STEP;
+
+                        updateChangeTimeLimit();
+                        clampChangeTime();
+
+                        if (!initializing && fromUser) {
+                            saveSettings();
+                        }
+
+                        refreshTexts();
+                    }
+
+                    @Override
+                    public void onStartTrackingTouch(
+                            SeekBar seekBar
+                    ) {
+                    }
+
+                    @Override
+                    public void onStopTrackingTouch(
+                            SeekBar seekBar
+                    ) {
+                    }
+                }
+        );
+
+        maxBrightnessSeekBar.setMax(4095);
+        maxBrightnessSeekBar.setOnSeekBarChangeListener(
+                new SeekBar.OnSeekBarChangeListener() {
+                    @Override
+                    public void onProgressChanged(
+                            SeekBar seekBar,
+                            int progress,
+                            boolean fromUser
+                    ) {
+                        maxBrightness = progress;
+
+                        if (!initializing && fromUser) {
+                            saveSettings();
+                        }
+
+                        refreshTexts();
+                    }
+
+                    @Override
+                    public void onStartTrackingTouch(
+                            SeekBar seekBar
+                    ) {
+                    }
+
+                    @Override
+                    public void onStopTrackingTouch(
+                            SeekBar seekBar
+                    ) {
+                    }
+                }
+        );
+
+        changeTimeSeekBar.setOnSeekBarChangeListener(
+                new SeekBar.OnSeekBarChangeListener() {
+                    @Override
+                    public void onProgressChanged(
+                            SeekBar seekBar,
+                            int progress,
+                            boolean fromUser
+                    ) {
+                        changeTimeMs =
+                                progress * CHANGE_STEP;
+
+                        if (changeTimeMs > loopTimeMs / 2) {
+                            changeTimeMs =
+                                    (loopTimeMs / 2 / CHANGE_STEP)
+                                            * CHANGE_STEP;
+
+                            seekBar.setProgress(
+                                    changeTimeMs / CHANGE_STEP
+                            );
+                        }
+
+                        if (!initializing && fromUser) {
+                            saveSettings();
+                        }
+
+                        refreshTexts();
+                    }
+
+                    @Override
+                    public void onStartTrackingTouch(
+                            SeekBar seekBar
+                    ) {
+                    }
+
+                    @Override
+                    public void onStopTrackingTouch(
+                            SeekBar seekBar
+                    ) {
+                    }
+                }
+        );
+
+        darkRatioSeekBar.setMax(100);
+        darkRatioSeekBar.setOnSeekBarChangeListener(
+                new SeekBar.OnSeekBarChangeListener() {
+                    @Override
+                    public void onProgressChanged(
+                            SeekBar seekBar,
+                            int progress,
+                            boolean fromUser
+                    ) {
+                        darkRatio = progress;
+
+                        if (!initializing && fromUser) {
+                            saveSettings();
+                        }
+
+                        refreshTexts();
+                    }
+
+                    @Override
+                    public void onStartTrackingTouch(
+                            SeekBar seekBar
+                    ) {
+                    }
+
+                    @Override
+                    public void onStopTrackingTouch(
+                            SeekBar seekBar
+                    ) {
+                    }
+                }
+        );
+    }
+
+    private void applySettingsToSeekBars() {
+        loopTimeSeekBar.setProgress(
+                (loopTimeMs - MIN_LOOP_TIME) / LOOP_STEP
+        );
+
+        maxBrightnessSeekBar.setProgress(
+                maxBrightness
+        );
+
+        updateChangeTimeLimit();
+
+        changeTimeSeekBar.setProgress(
+                changeTimeMs / CHANGE_STEP
+        );
+
+        darkRatioSeekBar.setProgress(
+                darkRatio
         );
     }
 
     private void updateChangeTimeLimit() {
-        int maxChangeProgress = Math.max(1, loopTimeMs / 50); // 50ms刻み
-        changeTimeSeekBar.setMax(maxChangeProgress);
+        int maxProgress =
+                (loopTimeMs / 2) / CHANGE_STEP;
 
-        if (changeTimeSeekBar.getProgress() > maxChangeProgress) {
-            changeTimeSeekBar.setProgress(maxChangeProgress);
+        changeTimeSeekBar.setMax(
+                Math.max(1, maxProgress)
+        );
+    }
+
+    private void clampChangeTime() {
+        int maxAllowed =
+                (loopTimeMs / 2 / CHANGE_STEP)
+                        * CHANGE_STEP;
+
+        if (changeTimeMs > maxAllowed) {
+            changeTimeMs = maxAllowed;
+
+            changeTimeSeekBar.setProgress(
+                    changeTimeMs / CHANGE_STEP
+            );
         }
     }
 
-    private void clampChangeTimeToLoop() {
-        int maxAllowed = loopTimeMs / 2;
-        if (changeTimeMs > maxAllowed) {
-            changeTimeMs = maxAllowed;
-            changeTimeSeekBar.setProgress(changeTimeMs / 50);
+    private void setupButtons() {
+        startButton.setOnClickListener(v -> {
+            if (Build.VERSION.SDK_INT >= 33 &&
+                    ContextCompat.checkSelfPermission(
+                            this,
+                            Manifest.permission.POST_NOTIFICATIONS
+                    ) != PackageManager.PERMISSION_GRANTED) {
+
+                notificationPermissionLauncher.launch(
+                        Manifest.permission.POST_NOTIFICATIONS
+                );
+                return;
+            }
+
+            startLEDControl();
+        });
+
+        stopButton.setOnClickListener(
+                v -> stopLEDControl()
+        );
+    }
+
+    private void requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+                ContextCompat.checkSelfPermission(
+                        this,
+                        Manifest.permission.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED) {
+
+            notificationPermissionLauncher.launch(
+                    Manifest.permission.POST_NOTIFICATIONS
+            );
         }
     }
 
     private void startLEDControl() {
-        if (isRunning) return;
+        saveSettings();
 
-        isRunning = true;
-        startButton.setEnabled(false);
-        stopButton.setEnabled(true);
-
-        controlThread = new Thread(() -> {
-            try {
-                openRootShell();
-
-                while (isRunning) {
-                    CyclePlan plan = buildCyclePlan();
-                    runOneCycle(plan);
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            } catch (Exception e) {
-                runOnUiThread(() ->
-                        Toast.makeText(
-                                MainActivity.this,
-                                "LED制御エラー: " + e.getMessage(),
-                                Toast.LENGTH_SHORT
-                        ).show()
+        Intent intent =
+                new Intent(
+                        this,
+                        LEDControlService.class
                 );
-            } finally {
-                try {
-                    if (rootStream != null) {
-                        writeLED(0);
-                    }
-                } catch (IOException ignored) {
-                }
 
-                closeRootShell();
+        intent.setAction(ACTION_START);
 
-                isRunning = false;
-                runOnUiThread(() -> {
-                    startButton.setEnabled(true);
-                    stopButton.setEnabled(false);
-                });
-            }
-        });
+        ContextCompat.startForegroundService(
+                this,
+                intent
+        );
 
-        controlThread.start();
+        prefs.edit()
+                .putBoolean(KEY_RUNNING, true)
+                .apply();
+
+        updateButtons();
+
+        Toast.makeText(
+                this,
+                "LED制御を開始しました",
+                Toast.LENGTH_SHORT
+        ).show();
     }
 
     private void stopLEDControl() {
-        isRunning = false;
-        synchronized (sleepLock) {
-            sleepLock.notifyAll();
-        }
-        if (controlThread != null) {
-            controlThread.interrupt();
-        }
+        Intent intent =
+                new Intent(
+                        this,
+                        LEDControlService.class
+                );
+
+        intent.setAction(ACTION_STOP);
+
+        startService(intent);
+
+        prefs.edit()
+                .putBoolean(KEY_RUNNING, false)
+                .apply();
+
+        updateButtons();
+
+        Toast.makeText(
+                this,
+                "LED制御を停止しました",
+                Toast.LENGTH_SHORT
+        ).show();
     }
 
-    private CyclePlan buildCyclePlan() {
-        long effectiveChange = Math.min(changeTimeMs, loopTimeMs / 2L);
-        long remaining = Math.max(0L, loopTimeMs - (effectiveChange * 2L));
+    private void updateButtons() {
+        boolean running =
+                prefs.getBoolean(
+                        KEY_RUNNING,
+                        false
+                );
 
-        long darkHold = Math.round(remaining * (darkRatio / 100.0));
-        long brightHold = remaining - darkHold;
-
-        return new CyclePlan(effectiveChange, darkHold, brightHold);
+        startButton.setEnabled(!running);
+        stopButton.setEnabled(running);
     }
 
-    private void runOneCycle(CyclePlan plan) throws IOException, InterruptedException {
-        // 暗い状態から開始
-        writeLED(0);
-        sleepInterruptible(plan.darkHoldMs);
+    @SuppressLint("SetTextI18n")
+    private void refreshTexts() {
+        long effectiveChange =
+                Math.min(
+                        changeTimeMs,
+                        loopTimeMs / 2L
+                );
 
-        // 暗 -> 明
-        fadeLED(0, maxBrightness, plan.changeMs);
+        long remaining =
+                Math.max(
+                        0L,
+                        loopTimeMs -
+                                effectiveChange * 2L
+                );
 
-        // 明るい状態
-        sleepInterruptible(plan.brightHoldMs);
+        long darkHold =
+                Math.round(
+                        remaining *
+                                darkRatio /
+                                100.0
+                );
 
-        // 明 -> 暗
-        fadeLED(maxBrightness, 0, plan.changeMs);
+        long brightHold =
+                remaining -
+                        darkHold;
+
+        loopTimeText.setText(
+                "ループ時間: " +
+                        loopTimeMs +
+                        " ms"
+        );
+
+        maxBrightnessText.setText(
+                "最大光量: " +
+                        maxBrightness +
+                        " / 4095"
+        );
+
+        changeTimeText.setText(
+                "変化時間: " +
+                        changeTimeMs +
+                        " ms（上限 " +
+                        (loopTimeMs / 2) +
+                        " ms）"
+        );
+
+        darkRatioText.setText(
+                "暗い時間の比率: " +
+                        darkRatio +
+                        "% / 暗: " +
+                        darkHold +
+                        " ms / 明: " +
+                        brightHold +
+                        " ms"
+        );
     }
 
-    private void fadeLED(int from, int to, long durationMs) throws IOException, InterruptedException {
-        if (!isRunning) return;
-
-        if (durationMs <= 0) {
-            writeLED(to);
-            return;
-        }
-
-        final double gamma = 2.2;
-
-        // 16ms前後で更新。短い変化でも最低30分割。
-        int steps = (int) Math.max(30, durationMs / 16);
-        long interval = Math.max(1L, durationMs / steps);
-
-        double startPerceived = brightnessToPerceived(from, gamma);
-        double endPerceived = brightnessToPerceived(to, gamma);
-
-        for (int i = 0; i <= steps && isRunning; i++) {
-            double t = i / (double) steps;
-
-            // 滑らかな加減速
-            double eased = easeInOutSine(t);
-
-            // 人間の目に自然に見えるよう、知覚空間で補間
-            double perceived = startPerceived + (endPerceived - startPerceived) * eased;
-
-            int value = perceivedToBrightness(perceived, gamma);
-            value = clamp(value, 0, maxBrightness);
-
-            writeLED(value);
-
-            if (i < steps) {
-                sleepInterruptible(interval);
-            }
-        }
-    }
-
-    private double brightnessToPerceived(int brightness, double gamma) {
-        if (maxBrightness <= 0) return 0.0;
-        double normalized = Math.max(0.0, Math.min(1.0, brightness / (double) maxBrightness));
-        return Math.pow(normalized, gamma);
-    }
-
-    private int perceivedToBrightness(double perceived, double gamma) {
-        if (maxBrightness <= 0) return 0;
-        double normalized = Math.max(0.0, Math.min(1.0, perceived));
-        return (int) Math.round(maxBrightness * Math.pow(normalized, 1.0 / gamma));
-    }
-
-    // 0→1 を滑らかにする
-    private double easeInOutSine(double t) {
-        return 0.5 - 0.5 * Math.cos(Math.PI * t);
-    }
-
-    private void sleepInterruptible(long ms) throws InterruptedException {
-        if (ms <= 0) {
-            if (!isRunning) throw new InterruptedException("stopped");
-            return;
-        }
-
-        synchronized (sleepLock) {
-            if (!isRunning) {
-                throw new InterruptedException("stopped");
-            }
-            sleepLock.wait(ms);
-            if (!isRunning) {
-                throw new InterruptedException("stopped");
-            }
-        }
-    }
-
-    private void openRootShell() throws IOException {
-        rootProcess = Runtime.getRuntime().exec("su");
-        rootStream = new DataOutputStream(rootProcess.getOutputStream());
-    }
-
-    private void closeRootShell() {
-        try {
-            if (rootStream != null) {
-                try {
-                    rootStream.writeBytes("exit\n");
-                    rootStream.flush();
-                } catch (IOException ignored) {
-                }
-                rootStream.close();
-                rootStream = null;
-            }
-        } catch (IOException ignored) {
-        }
-
-        if (rootProcess != null) {
-            rootProcess.destroy();
-            rootProcess = null;
-        }
-    }
-
-    private void writeLED(int brightness) throws IOException {
-        if (rootStream == null) {
-            throw new IOException("root shell not initialized");
-        }
-
-        rootStream.writeBytes("echo " + brightness + " > " + LED_PATH + "\n");
-        rootStream.flush();
-    }
-
-    private int clamp(int value, int min, int max) {
-        return Math.max(min, Math.min(max, value));
+    private int clamp(
+            int value,
+            int min,
+            int max
+    ) {
+        return Math.max(
+                min,
+                Math.min(max, value)
+        );
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        stopLEDControl();
-        closeRootShell();
-    }
-
-    private static class CyclePlan {
-        final long changeMs;
-        final long darkHoldMs;
-        final long brightHoldMs;
-
-        CyclePlan(long changeMs, long darkHoldMs, long brightHoldMs) {
-            this.changeMs = changeMs;
-            this.darkHoldMs = darkHoldMs;
-            this.brightHoldMs = brightHoldMs;
-        }
     }
 }
