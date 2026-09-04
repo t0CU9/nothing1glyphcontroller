@@ -306,7 +306,6 @@ public class MainActivity extends AppCompatActivity {
                 sleepInterruptible(interval);
             }
         }
-        writeLED(0);
     }
 
     private double brightnessToPerceived(int brightness, double gamma) {
